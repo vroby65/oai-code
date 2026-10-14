@@ -1,0 +1,57 @@
+#!/bin/bash
+set -eu
+
+config_file=${XDG_CONFIG_HOME:-$HOME/.config}/oai-code/config
+gateway_url=${OAI_GATEWAY_URL:-}
+model=${OAI_CODE_MODEL:-}
+
+if [ -f "$config_file" ]; then
+    while IFS='=' read -r name value; do
+        case "$name" in
+            gateway_url) [ -n "$gateway_url" ] || gateway_url=$value ;;
+            model) [ -n "$model" ] || model=$value ;;
+        esac
+    done < "$config_file"
+fi
+
+gateway_url=${gateway_url:-http://127.0.0.1:18765}
+gateway_url=${gateway_url%/}
+model=${model:-gpt-6.1-sol}
+
+if ! command -v codex >/dev/null 2>&1; then
+    echo 'Codex CLI is not installed.' >&2
+    exit 1
+fi
+
+if [ -z "${PI_AI_GATEWAY_KEY:-}" ]; then
+    if ! command -v secret-tool >/dev/null 2>&1; then
+        echo 'secret-tool is required to retrieve the gateway key.' >&2
+        exit 1
+    fi
+    PI_AI_GATEWAY_KEY=$(secret-tool lookup application oai-code gateway "$gateway_url" || true)
+    if [ -z "$PI_AI_GATEWAY_KEY" ]; then
+        printf 'Local gateway key for %s: ' "$gateway_url" >&2
+        read -r -s PI_AI_GATEWAY_KEY
+        echo >&2
+        if [ -z "$PI_AI_GATEWAY_KEY" ]; then
+            echo 'The gateway key cannot be empty.' >&2
+            exit 1
+        fi
+        printf '%s' "$PI_AI_GATEWAY_KEY" | secret-tool store \
+            --label='Pi AI Gateway key for oai-code' \
+            application oai-code gateway "$gateway_url"
+    fi
+fi
+export PI_AI_GATEWAY_KEY
+
+exec codex --no-daemon \
+    --model "$model" \
+    -c 'model_provider="pi_ai_gateway"' \
+    -c 'model_providers.pi_ai_gateway.name="Pi AI Gateway"' \
+    -c "model_providers.pi_ai_gateway.base_url=\"$gateway_url/codex/v1\"" \
+    -c 'model_providers.pi_ai_gateway.env_key="PI_AI_GATEWAY_KEY"' \
+    -c 'model_providers.pi_ai_gateway.wire_api="responses"' \
+    -c 'model_providers.pi_ai_gateway.requires_openai_auth=false' \
+    -c 'model_providers.pi_ai_gateway.supports_websockets=false' \
+    -c 'shell_environment_policy.filters.PI_AI_GATEWAY_KEY="exclude"' \
+    "$@"
