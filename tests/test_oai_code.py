@@ -22,7 +22,7 @@ class OaiCodeTests(unittest.TestCase):
                        PI_AI_GATEWAY_KEY='offline-secret',
                        OAI_GATEWAY_URL='http://192.168.1.50:18765',
                        OAI_CODE_MODEL='test-model')
-            subprocess.run([str(Path(__file__).parent / 'oai-code'), 'exec', 'hello'],
+            subprocess.run([str(Path(__file__).parents[1] / 'oai-code'), 'exec', 'hello'],
                            env=env, check=True)
             args = capture.read_text().splitlines()
             self.assertIn('model_provider="pi_ai_gateway"', args)

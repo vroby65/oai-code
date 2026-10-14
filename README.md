@@ -2,7 +2,7 @@
 
 `oai-code` starts Codex CLI through a private Pi AI Gateway while preserving
 the normal Codex coding tools. It is a client launcher only: the gateway server
-is maintained in the separate `raspberry-ai-gateway` project.
+is maintained in the separate `oai-gateway` project.
 
 It does not modify Claude Code or emulate the Anthropic Messages API.
 
@@ -51,7 +51,7 @@ The offline test uses a fake Codex executable and makes no network requests:
 
 ```bash
 bash -n oai-code
-python3 -m unittest -v test_oai_code
+python3 -m unittest discover -v -s tests
 ```
 
 ## License

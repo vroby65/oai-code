@@ -7,7 +7,7 @@ Files:
 
 - `oai-code` reads client configuration, retrieves the local gateway key, and
   starts Codex with a custom Responses provider.
-- `test_oai_code.py` verifies the generated Codex arguments without network
+- `tests/test_oai_code.py` verifies the generated Codex arguments without network
   access or real credentials.
 - `README.md` is the user-facing installation and security documentation.
 
@@ -25,7 +25,7 @@ Verify changes with:
 
 ```bash
 bash -n oai-code
-python3 -m unittest -v test_oai_code
+python3 -m unittest discover -v -s tests
 ```
 
 The test is intentionally offline. Update this file and `README.md` when the
