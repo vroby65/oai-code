@@ -1,15 +1,18 @@
 #!/bin/bash
 set -eu
 
+script_dir=$(cd -- "$(dirname -- "$0")" && pwd)
 config_file=${XDG_CONFIG_HOME:-$HOME/.config}/oai-code/config
 gateway_url=${OAI_GATEWAY_URL:-}
 model=${OAI_CODE_MODEL:-}
+reasoning_effort=${OAI_CODE_REASONING_EFFORT:-}
 
 if [ -f "$config_file" ]; then
     while IFS='=' read -r name value; do
         case "$name" in
             gateway_url) [ -n "$gateway_url" ] || gateway_url=$value ;;
             model) [ -n "$model" ] || model=$value ;;
+            reasoning_effort) [ -n "$reasoning_effort" ] || reasoning_effort=$value ;;
         esac
     done < "$config_file"
 fi
@@ -17,11 +20,14 @@ fi
 gateway_url=${gateway_url:-http://127.0.0.1:18765}
 gateway_url=${gateway_url%/}
 model=${model:-gpt-6.1-sol}
+reasoning_effort=${reasoning_effort:-medium}
 
-if ! command -v codex >/dev/null 2>&1; then
-    echo 'Codex CLI is not installed.' >&2
-    exit 1
-fi
+for command in claude python3; do
+    if ! command -v "$command" >/dev/null 2>&1; then
+        echo "$command is required." >&2
+        exit 1
+    fi
+done
 
 if [ -z "${PI_AI_GATEWAY_KEY:-}" ]; then
     if ! command -v secret-tool >/dev/null 2>&1; then
@@ -44,14 +50,113 @@ if [ -z "${PI_AI_GATEWAY_KEY:-}" ]; then
 fi
 export PI_AI_GATEWAY_KEY
 
-exec codex --no-daemon \
+if [ "$#" -eq 0 ] && [ -t 0 ] && [ -t 1 ]; then
+    for command in curl jq fzf; do
+        if ! command -v "$command" >/dev/null 2>&1; then
+            echo "$command is required for interactive selection." >&2
+            exit 1
+        fi
+    done
+    if ! account_catalog=$(
+        printf 'Authorization: Bearer %s\n' "$PI_AI_GATEWAY_KEY" |
+            curl --fail-with-body --silent --show-error \
+                --connect-timeout 5 --max-time 30 --header @- \
+                "$gateway_url/v1/models"
+    ); then
+        echo 'Could not retrieve the gateway model catalog.' >&2
+        exit 1
+    fi
+    if ! model_choices=$(printf '%s' "$account_catalog" | jq -er '
+        .models[]
+        | select(.visibility == "list")
+        | [.slug, (.display_name // .slug)]
+        | @tsv
+    '); then
+        echo 'The gateway returned no selectable models.' >&2
+        exit 1
+    fi
+    model_position=$(printf '%s\n' "$model_choices" | awk -F '\t' -v model="$model" '
+        $1 == model { print NR; exit }
+    ')
+    model_position=${model_position:-1}
+    if ! selection=$(printf '%s\n' "$model_choices" | fzf \
+        --sync --height=60% --layout=reverse --border --no-multi \
+        --delimiter=$'\t' --with-nth=2 --prompt='Model > ' \
+        --header="Configured: $model" --bind="start:pos($model_position)"); then
+        echo 'Model selection cancelled.' >&2
+        exit 130
+    fi
+    model=${selection%%$'\t'*}
+
+    effort_choices=$'low\tFast responses with lighter reasoning\nmedium\tBalanced speed and reasoning\nhigh\tGreater reasoning depth\nxhigh\tExtra-high reasoning depth\nmax\tMaximum reasoning depth'
+    effort_position=$(printf '%s\n' "$effort_choices" | awk -F '\t' -v effort="$reasoning_effort" '
+        $1 == effort { print NR; exit }
+    ')
+    effort_position=${effort_position:-2}
+    if ! selection=$(printf '%s\n' "$effort_choices" | fzf \
+        --sync --height=60% --layout=reverse --border --no-multi \
+        --delimiter=$'\t' --with-nth=1,2 --prompt='Reasoning > ' \
+        --header="Configured: $reasoning_effort" \
+        --bind="start:pos($effort_position)"); then
+        echo 'Reasoning selection cancelled.' >&2
+        exit 130
+    fi
+    reasoning_effort=${selection%%$'\t'*}
+fi
+
+case "$reasoning_effort" in
+    low|medium|high|xhigh|max) ;;
+    *) echo "Unsupported reasoning effort: $reasoning_effort" >&2; exit 2 ;;
+esac
+
+runtime_dir=$(mktemp -d "${TMPDIR:-/tmp}/oai-code.XXXXXX")
+port_file=$runtime_dir/port
+proxy_log=$runtime_dir/proxy.log
+proxy_pid=
+
+cleanup() {
+    if [ -n "$proxy_pid" ] && kill -0 "$proxy_pid" 2>/dev/null; then
+        kill "$proxy_pid" 2>/dev/null || true
+        wait "$proxy_pid" 2>/dev/null || true
+    fi
+    rm -f -- "$port_file" "$proxy_log"
+    rmdir -- "$runtime_dir" 2>/dev/null || true
+}
+trap cleanup EXIT
+trap 'exit 130' HUP INT TERM
+
+local_token=$(< /proc/sys/kernel/random/uuid)
+OAI_CODE_LOCAL_TOKEN=$local_token python3 -u "$script_dir/proxy.py" \
+    --gateway-url "$gateway_url" \
     --model "$model" \
-    -c 'model_provider="pi_ai_gateway"' \
-    -c 'model_providers.pi_ai_gateway.name="Pi AI Gateway"' \
-    -c "model_providers.pi_ai_gateway.base_url=\"$gateway_url/codex/v1\"" \
-    -c 'model_providers.pi_ai_gateway.env_key="PI_AI_GATEWAY_KEY"' \
-    -c 'model_providers.pi_ai_gateway.wire_api="responses"' \
-    -c 'model_providers.pi_ai_gateway.requires_openai_auth=false' \
-    -c 'model_providers.pi_ai_gateway.supports_websockets=false' \
-    -c 'shell_environment_policy.filters.PI_AI_GATEWAY_KEY="exclude"' \
-    "$@"
+    --reasoning-effort "$reasoning_effort" \
+    --port-file "$port_file" >"$proxy_log" 2>&1 &
+proxy_pid=$!
+
+for _ in {1..100}; do
+    if [ -s "$port_file" ]; then
+        break
+    fi
+    if ! kill -0 "$proxy_pid" 2>/dev/null; then
+        echo 'The local Claude compatibility proxy did not start.' >&2
+        sed -n '1,20p' "$proxy_log" >&2
+        exit 1
+    fi
+    sleep 0.05
+done
+if [ ! -s "$port_file" ]; then
+    echo 'Timed out while starting the local Claude compatibility proxy.' >&2
+    exit 1
+fi
+proxy_port=$(< "$port_file")
+case "$proxy_port" in
+    *[!0-9]*|'') echo 'The local proxy returned an invalid port.' >&2; exit 1 ;;
+esac
+unset PI_AI_GATEWAY_KEY
+
+env -u PI_AI_GATEWAY_KEY -u ANTHROPIC_API_KEY -u CLAUDE_CODE_OAUTH_TOKEN \
+    ANTHROPIC_BASE_URL="http://127.0.0.1:$proxy_port" \
+    ANTHROPIC_AUTH_TOKEN="$local_token" \
+    CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1 \
+    CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1 \
+    claude --model "$model" --effort "$reasoning_effort" "$@"
